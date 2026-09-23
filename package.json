@@ -1,0 +1,15 @@
+{
+  "dependencies": {
+    "mariadb": "^3.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^6.0.0"
+  },
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --env-file=.env index.ts",
+    "check": "tsc --noEmit"
+  }
+}
