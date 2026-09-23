@@ -50,7 +50,7 @@ const isMedia = (mime: string) => mime.startsWith("image/") || mime.startsWith("
 const download = async (row: SourceRow) => {
 	const { url, directory } = getImageInfo(row);
 
-	await mkdir(join(directory, row.Host), { recursive: true });
+	await mkdir(directory, { recursive: true });
 
 	for (const name of await readdir(directory)) {
 		const match = new RegExp(`^${row.ID}\\.([a-z0-9]+)$`).exec(name);
@@ -164,10 +164,8 @@ export const run = async () => {
 				const isPermanent = (error instanceof PermanentError) ? 1 : 0;
 				await pool.query(`
                     UPDATE Media_Source
-                    SET Status       = (CASE WHEN ? = 1 OR Attempts >= ? THEN "rejected" ELSE "queued" END),
-                        Leased_Until = NULL
-                    WHERE ID = ?
-                      AND Status = "leased"
+                    SET Status = (CASE WHEN ? = 1 OR Attempts >= ? THEN "rejected" ELSE "queued" END), Leased_Until = NULL
+                    WHERE ID = ? AND Status = "leased"
 				`, [isPermanent, MAX_ATTEMPTS, row.ID]);
 			}
 		}
