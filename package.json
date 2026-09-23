@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "file-type": "^22.1.1",
     "mariadb": "^3.5.4"
   },
   "devDependencies": {

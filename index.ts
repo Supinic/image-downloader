@@ -1,10 +1,10 @@
 import mariadb from "mariadb";
 import { createWriteStream } from "node:fs";
-import { mkdir, rename, stat, unlink } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { readdir, mkdir, rename, stat, unlink } from "node:fs/promises";
+import { join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { fileURLToPath } from "node:url";
+import { fileTypeFromFile } from "file-type";
 
 type SourceRow = {
 	ID: number;
@@ -36,51 +36,55 @@ const getImageInfo = (row: SourceRow) => {
 		? `.${row.Extension.replace(/^\./, "").toLowerCase()}`
 		: "";
 
-	const url = buildURL(row.Slug, ext);
-	const destination = join(DOWNLOAD_DIR, row.Host, `${row.ID}${ext}`);
-
-	return { url, destination };
+	return {
+		url: buildURL(row.Slug, ext),
+		directory: join(DOWNLOAD_DIR, row.Host)
+	};
 }
 
+const isMedia = (mime: string) => mime.startsWith("image/") || mime.startsWith("video/");
 const download = async (row: SourceRow) => {
-	const { url, destination } = getImageInfo(row);
+	const { url, directory } = getImageInfo(row);
 
-	await mkdir(join(DOWNLOAD_DIR, row.Host), { recursive: true });
+	await mkdir(join(directory, row.Host), { recursive: true });
 
-	// Recover from a previous successful download whose DB update failed.
-	try {
-		const existing = await stat(destination);
-		if (existing.isFile() && existing.size > 0) {
-			return destination;
+	for (const name of await readdir(directory)) {
+		const match = new RegExp(`^${row.ID}\\.([a-z0-9]+)$`).exec(name);
+		if (!match) {
+			continue;
+		}
+
+		const existing = join(directory, name);
+		const { size } = await stat(existing);
+		const type = (size > 0) ? await fileTypeFromFile(existing) : null;
+
+		if (type && isMedia(type.mime) && type.ext === match[1]) {
+			return existing;
 		}
 	}
-	catch (error) {
-		if (error && error instanceof Error && "code" in error && error.code !== "ENOENT") {
-			throw error;
-		}
-	}
 
-	const temporary = `${destination}.${process.pid}.part`;
+	const temporary = join(directory, `${row.ID}.${process.pid}.part`);
 	try {
 		const response = await fetch(url, {
 			signal: AbortSignal.timeout(TIMEOUT_MS),
 			redirect: "error"
 		});
 
-		const { body, ok, status } = response;
+		const { ok, body, status } = response;
 		if (!ok) {
 			const permanent = (status >= 400 && status < 500 && status !== 408 && status !== 429);
 			const ErrorType = permanent ? PermanentError : Error;
 
-			throw new ErrorType(`HTTP ${response.status}`);
+			throw new ErrorType(`HTTP ${status}`);
 		}
+
 		if (!body) {
 			throw new Error("Empty response body");
 		}
 
 		await pipeline(
 			Readable.fromWeb(body),
-			createWriteStream(temporary, { flags: "wx" })
+			createWriteStream(temporary, {flags: "wx"})
 		);
 
 		const { size } = await stat(temporary);
@@ -88,7 +92,15 @@ const download = async (row: SourceRow) => {
 			throw new Error("Downloaded file is empty");
 		}
 
+		// Determine the actual media format from its contents.
+		const type = await fileTypeFromFile(temporary);
+		if (!type || !isMedia(type.mime)) {
+			throw new PermanentError(`Unrecognized media format: ${url}`);
+		}
+
+		const destination = join(directory, `${row.ID}.${type.ext}`);
 		await rename(temporary, destination);
+
 		return destination;
 	}
 	finally {
@@ -98,7 +110,7 @@ const download = async (row: SourceRow) => {
 			}
 		});
 	}
-}
+};
 
 export const run = async () => {
 	const pool = mariadb.createPool({
@@ -112,10 +124,10 @@ export const run = async () => {
 
 	try {
 		const rows = await pool.query(`
-			SELECT ID, Host, Slug, Extension
-			FROM Media_Source
-			WHERE (Status = "queued" AND Attempts < ?) OR (Status = "leased" AND Leased_Until < UTC_TIMESTAMP(3))
-			ORDER BY ID
+            SELECT ID, Host, Slug, Extension
+            FROM Media_Source
+            WHERE (Status = "queued" AND Attempts < ?) OR (Status = "leased" AND Leased_Until < UTC_TIMESTAMP(3))
+            ORDER BY ID
 			LIMIT ${BATCH_SIZE}
 		`, [MAX_ATTEMPTS]);
 
@@ -147,10 +159,12 @@ export const run = async () => {
 
 				const isPermanent = (error instanceof PermanentError) ? 1 : 0;
 				await pool.query(`
-					UPDATE Media_Source
-					SET Status = (CASE WHEN ? = 1 OR Attempts >= ? THEN "rejected" ELSE "queued" END), Leased_Until = NULL
-					WHERE ID = ? AND Status = "leased"
-        		`, [isPermanent, MAX_ATTEMPTS, row.ID]);
+                    UPDATE Media_Source
+                    SET Status       = (CASE WHEN ? = 1 OR Attempts >= ? THEN "rejected" ELSE "queued" END),
+                        Leased_Until = NULL
+                    WHERE ID = ?
+                      AND Status = "leased"
+				`, [isPermanent, MAX_ATTEMPTS, row.ID]);
 			}
 		}
 	}
