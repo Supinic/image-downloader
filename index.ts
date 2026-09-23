@@ -24,7 +24,7 @@ const TIMEOUT_MS = 120_000;
 
 const SOURCES = {
 	imgur: (slug, ext) => `https://i.imgur.com/${slug}${ext}`,
-	nuuls: (slug, ext) => `https://nuuls.com/${slug}${ext}`,
+	nuuls: (slug, ext) => `https://i.nuuls.com/${slug}${ext}`,
 	kappa: (slug) => `https://kappa.lol/${slug}`,
 } satisfies Record<string, (slug: string, ext: string) => string>;
 
