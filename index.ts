@@ -18,7 +18,7 @@ if (!DOWNLOAD_DIR) {
 	throw new Error("No download directory configured");
 }
 
-const BATCH_SIZE = 25;
+const BATCH_SIZE = process.env.BATCH_SIZE ?? 25;
 const MAX_ATTEMPTS = 3;
 const TIMEOUT_MS = 120_000;
 
