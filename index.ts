@@ -1,6 +1,6 @@
 import mariadb from "mariadb";
 import { createWriteStream } from "node:fs";
-import { readdir, mkdir, rename, stat, unlink } from "node:fs/promises";
+import { mkdir, rename, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -18,7 +18,7 @@ if (!DOWNLOAD_DIR) {
 	throw new Error("No download directory configured");
 }
 
-const BATCH_SIZE = process.env.BATCH_SIZE ?? 25;
+const BATCH_SIZE = (process.env.BATCH_SIZE) ? Number(process.env.BATCH_SIZE) : 25;
 const MAX_ATTEMPTS = 3;
 const TIMEOUT_MS = 120_000;
 
@@ -40,34 +40,50 @@ const getImageInfo = (row: SourceRow) => {
 		? `.${row.Extension.replace(/^\./, "").toLowerCase()}`
 		: "";
 
+	const directory = join(DOWNLOAD_DIR, row.Host);
 	return {
 		url: buildURL(row.Slug, ext),
-		directory: join(DOWNLOAD_DIR, row.Host)
+		directory,
+		destination: join(directory, `${row.ID}${ext}`),
+		needsDetection: !ext
 	};
 }
 
 const isMedia = (mime: string) => mime.startsWith("image/") || mime.startsWith("video/");
-const download = async (row: SourceRow) => {
-	const { url, directory } = getImageInfo(row);
+const detectDestination = async (file: string, destination: string, url: string) => {
+	const type = await fileTypeFromFile(file);
+	if (!type || !isMedia(type.mime)) {
+		throw new PermanentError(`Unrecognized media format: ${url}`);
+	}
 
+	return `${destination}.${type.ext}`;
+};
+
+const download = async (row: SourceRow) => {
+	const { url, directory, destination, needsDetection } = getImageInfo(row);
 	await mkdir(directory, { recursive: true });
 
-	for (const name of await readdir(directory)) {
-		const match = new RegExp(`^${row.ID}\\.([a-z0-9]+)$`).exec(name);
-		if (!match) {
-			continue;
+	// Recover a previously existing file.
+	try {
+		const { size } = await stat(destination);
+		if (size > 0) {
+			if (!needsDetection) {
+				return destination;
+			}
+
+			// Only an existing extensionless file needs inspection.
+			const detected = await detectDestination(destination, destination, url);
+			await rename(destination, detected);
+			return detected;
 		}
-
-		const existing = join(directory, name);
-		const { size } = await stat(existing);
-		const type = (size > 0) ? await fileTypeFromFile(existing) : null;
-
-		if (type && isMedia(type.mime) && type.ext === match[1]) {
-			return existing;
+	}
+	catch (error) {
+		if (error instanceof Error && "code" in error && error.code !== "ENOENT") {
+			throw error;
 		}
 	}
 
-	const temporary = join(directory, `${row.ID}.${process.pid}.part`);
+	const temporary = `${destination}.${process.pid}.part`;
 	try {
 		const response = await fetch(url, {
 			signal: AbortSignal.timeout(TIMEOUT_MS),
@@ -77,7 +93,7 @@ const download = async (row: SourceRow) => {
 		const { ok, body, status } = response;
 		if (!ok) {
 			const permanent = (status >= 400 && status < 500 && status !== 408 && status !== 429);
-			const ErrorType = permanent ? PermanentError : Error;
+			const ErrorType = (permanent) ? PermanentError : Error;
 
 			throw new ErrorType(`HTTP ${status}`);
 		}
@@ -88,7 +104,7 @@ const download = async (row: SourceRow) => {
 
 		await pipeline(
 			Readable.fromWeb(body),
-			createWriteStream(temporary, {flags: "wx"})
+			createWriteStream(temporary, { flags: "wx" })
 		);
 
 		const { size } = await stat(temporary);
@@ -96,16 +112,12 @@ const download = async (row: SourceRow) => {
 			throw new Error("Downloaded file is empty");
 		}
 
-		// Determine the actual media format from its contents.
-		const type = await fileTypeFromFile(temporary);
-		if (!type || !isMedia(type.mime)) {
-			throw new PermanentError(`Unrecognized media format: ${url}`);
-		}
+		const finalDestination = (needsDetection)
+			? await detectDestination(temporary, destination, url)
+			: destination;
 
-		const destination = join(directory, `${row.ID}.${type.ext}`);
-		await rename(temporary, destination);
-
-		return destination;
+		await rename(temporary, finalDestination);
+		return finalDestination;
 	}
 	finally {
 		await unlink(temporary).catch(error => {
